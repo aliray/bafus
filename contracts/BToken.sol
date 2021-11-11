@@ -1,180 +1,262 @@
-// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.2;
-import "@openzeppelin/contracts-upgradeable@4.3.2/token/ERC20/ERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable@4.3.2/proxy/utils/Initializable.sol";
-import "./Ownable.sol";
-import "./Assets.sol";
-import "./interfaces/InterestRateModel.sol";
-import "./interfaces/AuditerInterface.sol";
 
-abstract contract BToken is Assets, Ownable, Initializable, ERC20Upgradeable {
-    modifier nonReentrant() {
-        require(notEntered, "re-entered");
-        notEntered = false;
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "./comptroller/Comptroller.sol";
+import "./interfaces/ComptrollerInterfaces.sol";
+import "./misc/SafeMath.sol";
+import "./interfaces/InterestRateModel.sol";
+
+contract BToken is
+    OwnableUpgradeable,
+    ERC20Upgradeable,
+    ReentrancyGuard,
+    Initializable
+{
+    using SafeMath for uint256;
+
+    address public comptroller;
+    address public interestModel;
+    address public underlyingToken;
+    address public configure;
+    address public router;
+
+    /** user loan records */
+    uint256 public totalBorrows;
+    mapping(address => uint256) balanceOfBorrows;
+
+    /** totalReserves */
+    uint256 public totalReserves;
+
+    /** init params */
+    uint256 maxBorrowRate = 0.0005e16;
+    uint256 initexrate = 1e18;
+    uint256 accrualBlockNumber;
+
+    /** modify */
+    modifier onlyRouter() {
+        requre(msg.sender == router);
         _;
-        notEntered = true; // get a gas-refund post-Istanbul
     }
 
     function initialize(
-        AuditerInterface auditer_,
-        InterestRateModel interestRateModel_,
         string memory name_,
-        string memory symbol_
-    ) public initializer onlyOwner {
+        string memory symbol_,
+        address underlyingToken_,
+        address comptroller_,
+        address interestModel_,
+        address configure_,
+        address router_
+    ) public onlyOwner initializer {
         __ERC20_init(name_, symbol_);
-
-        auditer = auditer_;
-        interestRateModel = interestRateModel_;
-
-        notEntered = true;
-        accrualBolckNumber = block.number;
+        underlyingToken = underlyingToken_;
+        comptroller = comptroller_;
+        interestModel = interestModel_;
+        configure = configure_;
+        router = router_;
     }
 
-    // calculate the interest and update the borrow and despoit balance
-    function calcInterest() public {
-        uint256 curBlockNumber = block.number;
-        require(curBlockNumber != accrualBolckNumber);
+    //交换率
+    function calcexrate() internal view returns (uint256) {
+        uint256 totalSupply_ = totalSupply();
+        if (totalSupply_ == 0) {
+            return initexrate;
+        }
 
-        uint256 cashCalc = getCash();
-        uint256 totalBorrowsCalc = totalBorrows;
-        uint256 totalReservesCalc = totalReserves;
-
-        uint256 borrowRate = interestRateModel.getBorrowRate(
-            cashCalc,
-            totalReservesCalc,
-            totalReservesCalc
-        ); // wait for implements
-
-        uint256 deltaBlocks = curBlockNumber - accrualBolckNumber;
-        uint256 deltaInterests = deltaBlocks * borrowRate * totalBorrows;
-
-        totalBorrows = totalBorrows + deltaInterests;
-        totalReserves = totalReserves + deltaInterests;
-        accrualBolckNumber = curBlockNumber;
+        uint256 totalCash_ = getCash();
+        uint256 cashBorrowsAll_ = totalCash_.add(totalBorrows).sub(
+            totalReserves
+        );
+        return cashBorrowsAll_.div(totalSupply_);
     }
 
-    // despoit
-    function depositInternal(address despoiter, uint256 amount)
-        internal
+    //计息
+    function calcInterest() external returns (uint256) {
+        uint256 curBlockNumber_ = getBlockNumber();
+        require(curBlockNumber_ != accrualBlockNumber, "block number error.");
+
+        uint256 borrowRate_ = InterestRateModel(interestModel).getBorrowRate(
+            getCash(),
+            totalBorrows,
+            totalReserves
+        );
+        require(borrowRate_ <= maxBorrowRate, "borrow rate > max borrow rate.");
+
+        uint256 deltBlock_ = curBlockNumber_.sub(accrualBlockNumber);
+        uint256 totalInterest_ = borrowRate_.mul(deltBlock_).mul(totalBorrows);
+
+        totalBorrows = totalBorrows.add(totalInterest_);
+        totalReserves = totalReserves.add(totalInterest_);
+        accrualBlockNumber = curBlockNumber_;
+
+        return totalInterest_;
+    }
+
+    // 存款
+    function deposit(address depositer, uint256 amount)
+        external
+        onlyRouter
         nonReentrant
+        returns (uint256)
     {
         calcInterest();
-        // validate can be despoit or not
-        auditer.auditDeposit(address(this), despoiter, amount);
+        require(amount > 0, "deposit amount should be > 0.");
+        require(
+            ComptrollerInterface(comptroller).depositCheck(
+                underlyingToken,
+                depositer,
+                amount
+            ),
+            "not pass the comptroller deposit."
+        );
+        uint256 xRate = calcexrate();
+        uint256 actualMintAmount = doTransferIn(depositer, amount);
+        uint256 mintAmount = actualMintAmount.div(xRate);
 
-        transferFrom(msg.sender, address(this), amount);
+        _mint(depositer, mintAmount);
 
-        uint256 exrate = calcExchangeRate();
-        uint256 mintAmount = amount * exrate;
-        // _mint(msg.sender, mintAmount);
-
-        transferIn(despoiter, mintAmount);
+        return mintAmount;
     }
 
-    // withdraw
-    function withDrawInternal(
-        address payable withDrawer,
-        uint256 redeemTokens,
-        uint256 redeemEths
-    ) internal nonReentrant {
-        calcInterest();
-
-        uint256 exrate = calcExchangeRate();
-        uint256 withdrawTokens = redeemTokens > 0
-            ? redeemTokens * exrate
-            : redeemEths / exrate;
-
-        // validate can be withdraw or not
-        require(
-            block.number != accrualBolckNumber,
-            "block number eq accrualBolckNumber"
-        );
-        require(
-            getCash() > withdrawTokens,
-            "block number eq accrualBolckNumber"
-        );
-
-        transferOut(withDrawer, withdrawTokens);
-    }
-
-    // borrow
-    function borrowInternal(address payable borrower, uint256 borrowAmount)
-        internal
-        nonReentrant
+    //取款
+    function withdrawal(address account, uint256 btokenAmount)
+        external
+        onlyRouter
+        noReentrant
+        returns (bool)
     {
         calcInterest();
-        // validate can be borrow or not !import
+        uint256 xRate = calcexrate();
+        uint256 withdrawalAmount = btokenAmount.div(xRate);
         require(
-            block.number != accrualBolckNumber,
-            "block number eq accrualBolckNumber"
+            ComptrollerInterface(comptroller).withdrawalCheck(
+                underlyingToken,
+                account,
+                withdrawalAmount
+            ),
+            "Not pass the comptroller withdrawal check."
         );
-        require(getCash() > borrowAmount, "borrowAmount > cash");
+        require(
+            accrualBlockNumber != getBlockNumber(),
+            "Market's block number equals current block number!"
+        );
+        require(getCash() > withdrawalAmount, "Now cash < withdrawal amount.");
 
-        transferOut(borrower, borrowAmount);
+        _burn(account, btokenAmount);
 
-        accountBorrows[borrower] = accountBorrows[borrower] + borrowAmount;
-        totalBorrows = totalBorrows + borrowAmount;
+        return doTransferOut(msg.sender, withdrawalAmount);
     }
 
-    // pay borrow
-    function payBorrowInternal(
+    //借款
+    function borrow(address account, uint256 borrowAmount)
+        external
+        onlyRouter
+        noReentrant
+        returns (bool)
+    {
+        calcInterest();
+        require(
+            ComptrollerInterface(comptroller).borrowCheck(
+                underlyingToken,
+                account,
+                borrowAmount
+            ),
+            "Not pass the comptroller borrow check."
+        );
+        require(
+            accrualBlockNumber != getBlockNumber(),
+            "Market's block number equals current block number!"
+        );
+        require(getCash() > borrowAmount, "Now cash < borrow amount.");
+
+        totalBorrows += borrowAmount;
+        balanceOfBorrows[account] += borrowAmount;
+
+        return doTransserOut(account, borrowAmount);
+    }
+
+    //还款
+    function repayBorrow(
         address payer,
         address borrower,
-        uint256 payAmount,
-        bool payall
-    ) internal nonReentrant {
+        address repayAmount
+    ) external onlyRouter noReentrant returns (bool) {
         calcInterest();
-        // validate can be pay borrow or not
-
-        uint256 accountBorrowed = accountBorrows[borrower];
-        uint256 repayAmount = payall ? accountBorrowed : payAmount;
-
         require(
-            block.number != accrualBolckNumber,
-            "block number eq accrualBolckNumber"
+            ComptrollerInterface(comptroller).repayBorrowCheck(
+                underlyingToken,
+                payer,
+                borrower,
+                repayAmount
+            ),
+            "Not pass the comptroller repay check."
         );
-        require(repayAmount > 0, "repayAmount > 0 ");
-
-        transferIn(payer, repayAmount);
-        accountBorrows[borrower] = accountBorrows[borrower] - repayAmount;
-        totalBorrows = totalBorrows - repayAmount;
+        require(
+            accrualBlockNumber != getBlockNumber(),
+            "Market's block number equals current block number!"
+        );
+        if (doTransferIn(payer, repayAmount)) {
+            totalBorrows = totalBorrows.sub(repayAmount);
+            balanceOfBorrows[borrower] = balanceOfBorrows[borrower].sub(
+                repayAmount
+            );
+            return true;
+        }
+        return false;
     }
 
-    // exchange
-    function calcExchangeRate() internal view returns (uint256) {
-        uint256 _totalSupply = totalSupply();
-        uint256 _totalCash = getCash();
-        return
-            _totalSupply == 0
-                ? initialExchangeRateMantissa
-                : (_totalCash + totalBorrows - totalReserves) / _totalSupply;
+    //清算
+    function liquidity(
+        address borrower_,
+        address liquidator_,
+        address bTokenBorrowed_,
+        address bTokenCollateral_,
+        uint256 repayAmount_
+    ) external onlyRouter noReentrant returns (uint256) {
+        calcInterest();
+        BToken(bTokenCollateral_).calcInterest();
+        require(
+            ComptrollerInterface(comptroller).liquidityCheck(
+                bTokenBorrowed_,
+                bTokenCollateral_,
+                liquidator_,
+                borrower_,
+                repayAmount_
+            ),
+            "Not pass the comptroller liquidity check."
+        );
+        require(
+            this.accrualBlockNumber != getBlockNumber(),
+            "New Block number can not eq the older block number error."
+        );
+        require(
+            this.accrualBlockNumber !=
+                BToken(bTokenCollateral_).getBlockNumber(),
+            "New Block number can not eq the older block number error."
+        );
+        require(borrower_ != liquidator_, "Liquidator cannot be the borrower!");
+        require(repayAmount > 0, "Repay amount should > 0.");
+
+        //还款
+
+        //计算 清算后获得的代币
+
+        //转移至清算者账户
     }
 
-    function getCash() internal view virtual returns (uint256);
-
-    function transferIn(address despoiter, uint256 amount)
-        internal
-        virtual
-        returns (uint256);
-
-    function transferOut(address payable withDrawer, uint256 redeemTokens)
-        internal
-        virtual;
-
-    // admin function
-    function setAuditer(AuditerInterface auditer_) public {
-        auditer = auditer_;
+    /** utils function */
+    function getBlockNumber() internal view returns (uint256) {
+        return block.number;
     }
 
-    function setInterestModel(InterestRateModel interestRateModel_)
-        public
-        onlyOwner
-    {
-        interestRateModel = interestRateModel_;
+    function getCash() internal view returns (uint256) {
+        return IERC20(underlyingToken).balanceOf(address(this));
     }
 
-    // tools function
-    function getAccountSnapshot(address account)
+    function getAccountSnapshot(address account_)
         external
         view
         returns (
@@ -183,9 +265,41 @@ abstract contract BToken is Assets, Ownable, Initializable, ERC20Upgradeable {
             uint256
         )
     {
-        uint256 bTokenBalance = balanceOf(account);
-        uint256 borrowBalance = accountBorrows[account];
-        uint256 exrate = calcExchangeRate();
-        return (bTokenBalance, borrowBalance, exrate);
+        return (
+            balanceOf(account_),
+            getBalnaceOfBorrow(account_),
+            calcexrate()
+        );
+    }
+
+    function getBalnaceOfBorrow(address account_)
+        external
+        view
+        returns (uint256)
+    {
+        return balanceOfBorrows[account_];
+    }
+
+    function doTransferIn(address from, uint256 amount)
+        internal
+        returns (uint256)
+    {
+        IERC20 token = IERC20(underlyingToken);
+        uint256 balanceBefore = IERC20(underlyingToken).balanceOf(
+            address(this)
+        );
+        token.transferFrom(from, address(this), amount);
+        uint256 balanceAfter = token.balanceOf(address(this));
+
+        require(balanceAfter >= balanceBefore, "TOKEN_TRANSFER_IN_OVERFLOW");
+        return balanceAfter - balanceBefore; // underflow already checked above, just subtract
+    }
+
+    function doTransserOut(address recipient, uint256 amount)
+        internal
+        returns (bool)
+    {
+        IERC20 token = IERC20(underlyingToken);
+        return token.transfer(recipient, amount);
     }
 }
