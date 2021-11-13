@@ -1,7 +1,6 @@
 pragma solidity ^0.8.2;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -11,10 +10,10 @@ import "./misc/SafeMath.sol";
 import "./interfaces/InterestRateModel.sol";
 
 contract BToken is
-    OwnableUpgradeable,
+    Initializable,
     ERC20Upgradeable,
     ReentrancyGuard,
-    Initializable
+    OwnableUpgradeable
 {
     using SafeMath for uint256;
 
@@ -38,7 +37,7 @@ contract BToken is
 
     /** modify */
     modifier onlyRouter() {
-        requre(msg.sender == router);
+        require(msg.sender == router);
         _;
     }
 
@@ -74,7 +73,7 @@ contract BToken is
     }
 
     //计息
-    function calcInterest() external returns (uint256) {
+    function calcInterest() public returns (uint256) {
         uint256 curBlockNumber_ = getBlockNumber();
         require(curBlockNumber_ != accrualBlockNumber, "block number error.");
 
@@ -125,7 +124,7 @@ contract BToken is
     function withdrawal(address account, uint256 btokenAmount)
         external
         onlyRouter
-        noReentrant
+        nonReentrant
         returns (bool)
     {
         calcInterest();
@@ -147,14 +146,14 @@ contract BToken is
 
         _burn(account, btokenAmount);
 
-        return doTransferOut(msg.sender, withdrawalAmount);
+        return doTranserOut(msg.sender, withdrawalAmount);
     }
 
     //借款
     function borrow(address account, uint256 borrowAmount)
         external
         onlyRouter
-        noReentrant
+        nonReentrant
         returns (bool)
     {
         calcInterest();
@@ -175,7 +174,7 @@ contract BToken is
         totalBorrows += borrowAmount;
         balanceOfBorrows[account] += borrowAmount;
 
-        return doTransserOut(account, borrowAmount);
+        return doTranserOut(account, borrowAmount);
     }
 
     //还款
@@ -183,69 +182,69 @@ contract BToken is
         address payer,
         address borrower,
         address repayAmount
-    ) external onlyRouter noReentrant returns (bool) {
-        calcInterest();
-        require(
-            ComptrollerInterface(comptroller).repayBorrowCheck(
-                underlyingToken,
-                payer,
-                borrower,
-                repayAmount
-            ),
-            "Not pass the comptroller repay check."
-        );
-        require(
-            accrualBlockNumber != getBlockNumber(),
-            "Market's block number equals current block number!"
-        );
-        if (doTransferIn(payer, repayAmount)) {
-            totalBorrows = totalBorrows.sub(repayAmount);
-            balanceOfBorrows[borrower] = balanceOfBorrows[borrower].sub(
-                repayAmount
-            );
-            return true;
-        }
+    ) external onlyRouter nonReentrant returns (bool) {
+        // calcInterest();
+        // require(
+        //     ComptrollerInterface(comptroller).repayBorrowCheck(
+        //         underlyingToken,
+        //         payer,
+        //         borrower
+        //         // repayAmount
+        //     ),
+        //     "Not pass the comptroller repay check."
+        // );
+        // require(
+        //     accrualBlockNumber != getBlockNumber(),
+        //     "Market's block number equals current block number!"
+        // );
+        // if (doTransferIn(payer, repayAmount)) {
+        //     totalBorrows = totalBorrows.sub(repayAmount);
+        //     balanceOfBorrows[borrower] = balanceOfBorrows[borrower].sub(
+        //         repayAmount
+        //     );
+        //     return true;
+        // }
         return false;
     }
 
     //清算
-    function liquidity(
-        address borrower_,
-        address liquidator_,
-        address bTokenBorrowed_,
-        address bTokenCollateral_,
-        uint256 repayAmount_
-    ) external onlyRouter noReentrant returns (uint256) {
-        calcInterest();
-        BToken(bTokenCollateral_).calcInterest();
-        require(
-            ComptrollerInterface(comptroller).liquidityCheck(
-                bTokenBorrowed_,
-                bTokenCollateral_,
-                liquidator_,
-                borrower_,
-                repayAmount_
-            ),
-            "Not pass the comptroller liquidity check."
-        );
-        require(
-            this.accrualBlockNumber != getBlockNumber(),
-            "New Block number can not eq the older block number error."
-        );
-        require(
-            this.accrualBlockNumber !=
-                BToken(bTokenCollateral_).getBlockNumber(),
-            "New Block number can not eq the older block number error."
-        );
-        require(borrower_ != liquidator_, "Liquidator cannot be the borrower!");
-        require(repayAmount > 0, "Repay amount should > 0.");
+    // function liquidity(
+    //     address borrower_,
+    //     address liquidator_,
+    //     address bTokenBorrowed_,
+    //     address bTokenCollateral_,
+    //     uint256 repayAmount_
+    // ) external onlyRouter nonReentrant returns (uint256) {
+    //     calcInterest();
+    //     BToken(bTokenCollateral_).calcInterest();
+    //     require(
+    //         ComptrollerInterface(comptroller).liquidityCheck(
+    //             bTokenBorrowed_,
+    //             bTokenCollateral_,
+    //             liquidator_,
+    //             borrower_,
+    //             repayAmount_
+    //         ),
+    //         "Not pass the comptroller liquidity check."
+    //     );
+    //     require(
+    //         this.accrualBlockNumber != getBlockNumber(),
+    //         "New Block number can not eq the older block number error."
+    //     );
+    //     require(
+    //         this.accrualBlockNumber !=
+    //             BToken(bTokenCollateral_).getBlockNumber(),
+    //         "New Block number can not eq the older block number error."
+    //     );
+    //     require(borrower_ != liquidator_, "Liquidator cannot be the borrower!");
+    //     require(repayAmount > 0, "Repay amount should > 0.");
 
-        //还款
+    //     //还款
 
-        //计算 清算后获得的代币
+    //     //计算 清算后获得的代币
 
-        //转移至清算者账户
-    }
+    //     //转移至清算者账户
+    // }
 
     /** utils function */
     function getBlockNumber() internal view returns (uint256) {
@@ -254,6 +253,14 @@ contract BToken is
 
     function getCash() internal view returns (uint256) {
         return IERC20(underlyingToken).balanceOf(address(this));
+    }
+
+    function getBalnaceOfBorrow(address account_)
+        public
+        view
+        returns (uint256)
+    {
+        return balanceOfBorrows[account_];
     }
 
     function getAccountSnapshot(address account_)
@@ -272,14 +279,6 @@ contract BToken is
         );
     }
 
-    function getBalnaceOfBorrow(address account_)
-        external
-        view
-        returns (uint256)
-    {
-        return balanceOfBorrows[account_];
-    }
-
     function doTransferIn(address from, uint256 amount)
         internal
         returns (uint256)
@@ -295,7 +294,7 @@ contract BToken is
         return balanceAfter - balanceBefore; // underflow already checked above, just subtract
     }
 
-    function doTransserOut(address recipient, uint256 amount)
+    function doTranserOut(address recipient, uint256 amount)
         internal
         returns (bool)
     {

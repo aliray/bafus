@@ -5,7 +5,7 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract PriceOracleV3 is Ownable {
+contract PriceOracleMock is Ownable {
     mapping(string => uint256) internal tokens;
 
     constructor() {

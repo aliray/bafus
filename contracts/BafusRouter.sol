@@ -2,7 +2,8 @@ pragma solidity ^0.8.2;
 
 import "./weth10/interfaces/IWETH10.sol";
 import "./interfaces/BTokenInterface.sol";
-import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
     using for intract with ERC Btoken,if something wrong with bToken, router will emit a error 
@@ -21,12 +22,12 @@ contract BafusRouter is Initializable, OwnableUpgradeable {
 
     function depositEth() external payable returns (uint256) {
         IWETH10(weth).deposit{value: msg.value}();
-        return deposit(weth, ethAmount);
+        return BTokenInterface(weth).deposit(msg.sender, msg.value);
     }
 
-    function withdrawalEth(uint256 ethAmount) {
-        if (withdrawal(weth, ethAmount)) {
-            IWETH10(weth).withdrawTo(msg.sender, ethAmount);
+    function withdrawalEth(uint256 ethAmount) public returns (bool) {
+        if (BTokenInterface(weth).withdrawal(msg.sender, ethAmount)) {
+            IWETH10(weth).withdrawTo(payable(msg.sender), ethAmount);
             return true;
         }
         return false;
@@ -41,7 +42,7 @@ contract BafusRouter is Initializable, OwnableUpgradeable {
 
     function withdrawal(address bToken, uint256 amount)
         external
-        returns (uint256)
+        returns (bool)
     {
         return BTokenInterface(bToken).withdrawal(msg.sender, amount);
     }

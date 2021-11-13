@@ -4,8 +4,10 @@ import "./Adfun.sol";
 import "./Configure.sol";
 import "../Markets.sol";
 import "../interfaces/ComptrollerInterfaces.sol";
+import "../interfaces/BTokenInterface.sol";
 import "../BToken.sol";
-import "../interfaces/PriceOracle.sol";
+import "../interfaces/PriceOracleInterface.sol";
+import "../misc/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -36,7 +38,7 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
         address bToken_,
         address depositer_,
         uint256 amount_
-    ) external view returns (bool) {
+    ) external override view returns (bool) {
         require(amount_ > 0, "amount should > 0 .");
         require(!tokenDepositGuardian[bToken_], "deposit is paused.");
         require(!blackList[depositer_], "blocked address.");
@@ -49,7 +51,7 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
         address bToken,
         address redeemer,
         uint256 redeemTokens
-    ) external returns (bool) {
+    ) external override view returns (bool) {
         require(redeemTokens > 0, "amount should > 0 .");
         require(!tokenDepositGuardian[bToken], "withdraw is paused.");
         require(!blackList[redeemer], "blocked address.");
@@ -69,7 +71,7 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
         address bToken,
         address borrower,
         uint256 amount
-    ) external returns (bool) {
+    ) external override view returns (bool) {
         require(markets.isListed(bToken), "token did not listed.");
         require(amount > 0, "amount should > 0 .");
         require(!tokenLoanGuardian[bToken], "token borrow biz is paused.");
@@ -88,39 +90,39 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
         address payer,
         address borrower,
         uint256 repayAmount
-    ) external returns (bool) {}
+    ) external override view returns (bool) {}
 
     // 审计是否可以清算
-    function liquidityCheck(
-        address bTokenBorrowed_,
-        address bTokenCollateral_,
-        address liquidator_,
-        address borrower_,
-        uint256 repayAmount_
-    ) external view returns (bool) {
-        if (
-            markets.isListed(bTokenBorrowed_) ||
-            markets.isListed(cbTokenCollateral_)
-        ) {
-            return false;
-        }
-        uint256 borrowBalance_ = BToken(bTokenBorrowed_).getBalnaceOfBorrow(
-            borrower_
-        );
-        uint256 maxLiquidity_ = closeFactor.mul(borrowBalance_);
-        require(
-            repayAmount_ < maxLiquidity_,
-            "repay amount >= max liquidity amount."
-        );
-        (bool shortfall, ) = accountLiquidityCheck(
-            borrower_,
-            bTokenBorrowed_,
-            0,
-            0
-        );
-        require(shortfall, "borrower should can be liquidity.");
-        return true;
-    }
+    // function liquidityCheck(
+    //     address bTokenBorrowed_,
+    //     address bTokenCollateral_,
+    //     address liquidator_,
+    //     address borrower_,
+    //     uint256 repayAmount_
+    // ) external view returns (bool) {
+    //     if (
+    //         markets.isListed(bTokenBorrowed_) ||
+    //         markets.isListed(cbTokenCollateral_)
+    //     ) {
+    //         return false;
+    //     }
+    //     uint256 borrowBalance_ = BToken(bTokenBorrowed_).getBalnaceOfBorrow(
+    //         borrower_
+    //     );
+    //     uint256 maxLiquidity_ = closeFactor.mul(borrowBalance_);
+    //     require(
+    //         repayAmount_ < maxLiquidity_,
+    //         "repay amount >= max liquidity amount."
+    //     );
+    //     (bool shortfall, ) = accountLiquidityCheck(
+    //         borrower_,
+    //         bTokenBorrowed_,
+    //         0,
+    //         0
+    //     );
+    //     require(shortfall, "borrower should can be liquidity.");
+    //     return true;
+    // }
 
     // 计算清算后可获得的代币数量
     function calcSeizeTokens(
@@ -128,15 +130,7 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
         address cTokenCollateral,
         uint256 actualRepayAmount
     ) external view returns (uint256) {
-        uint256 priceBorrowedMantissa = oracle.getUnderlyingPrice(
-            CToken(cTokenBorrowed)
-        );
-        uint256 priceCollateralMantissa = oracle.getUnderlyingPrice(
-            CToken(cTokenCollateral)
-        );
-        if (priceBorrowedMantissa == 0 || priceCollateralMantissa == 0) {
-            return (uint256(Error.PRICE_ERROR), 0);
-        }
+        return 0;
     }
 
     /** check account liquidity is enough for borrow or redeem */
@@ -149,11 +143,15 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
         BToken btokenAsset_;
         uint256 sumBorrows_;
         uint256 sumCollateral_;
-        address[] assets_ = markets.getMortgages(account_);
+        address[] memory assets_ = markets.getMortgages(account_);
+
         for (uint256 i = 0; i < assets_.length; i++) {
             btokenAsset_ = BToken(assets_[i]);
-            (bTokenBalance_, borrowBalance_, exchangeRate_) = asset
-                .getAccountSnapshot(account);
+            (
+                uint256 bTokenBalance_,
+                uint256 borrowBalance_,
+                uint256 exchangeRate_
+            ) = btokenAsset_.getAccountSnapshot(account_);
 
             uint256 assetPrice_ = priceOracle.getLatestPrice(
                 btokenAsset_.symbol()
@@ -170,10 +168,8 @@ contract Comptroller is Ownable, ComptrollerInterface, Configure {
             sumBorrows_ = sumBorrows_.add(borrowBalance_.mul(assetPrice_));
 
             if (assets_[i] == bToken_) {
-                sumBorrows_ = sumBorrows_.add(
-                    tokensTodenom_.mul(redeemTokens_)
-                );
-                sumBorrows_ = sumBorrows_.add(borrowAmount_.mul(assetPrice_));
+                sumBorrows_ += tokensTodenom_.mul(redeemTokens_);
+                sumBorrows_ += borrowAmount_.mul(assetPrice_);
             }
         }
         return (
